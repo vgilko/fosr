@@ -1,75 +1,85 @@
-from math import sqrt
-
-import matplotlib.pyplot as plt
-
 from plate import *
 
 
-def solve(plate: Plate, end_time=1000):
-    tau = end_time / 100
+class Solver:
+    def __init__(self, plate: Plate, laser: Laser, end_time=100):
+        self.plate = plate
+        self.laser = laser
+        self.end_time = end_time
 
-    axis_y_shape = plate.matrix.shape[0]
-    axis_x_shape = plate.matrix.shape[1]
+        self.tau = self.end_time / 100
 
-    alfa = np.zeros(axis_x_shape)
-    beta = np.zeros(axis_x_shape)
+        self.x_axis_shape = plate.matrix.shape[1]
+        self.y_axis_shape = plate.matrix.shape[0]
 
-    time = 0
+        self.alfa = np.zeros(self.x_axis_shape)
+        self.betta = np.zeros(self.x_axis_shape)
 
-    sqrt_dy = sqrt(plate.dy)
-    ci = plate.thermal_conductivity / sqrt(plate.dx)
-    atau_coeff = 2.0 * plate.thermal_diffusivity * tau
-    thermal_conductivity_sqrt = plate.thermal_conductivity / sqrt_dy
+        self.a_i_x = plate.thermal_conductivity / (plate.dx ** 2)
+        self.b_i_x = 2.0 * self.a_i_x + self.plate.material_density * self.plate.heat_capacity / self.tau
+        self.c_i_x = self.a_i_x
 
-    while time < end_time:
-        time += tau
+        self.tau_coeff = 2.0 * self.plate.thermal_diffusivity * self.tau
+        self.dy_sqr = (self.plate.dy ** 2)
 
-        # ai = plate.thermal_conductivity / sqrt(plate.dx)
-        bi = 2.0 * ci + plate.material_density * plate.heat_capacity / tau
-        for j in range(axis_y_shape):
-            alfa[1] = 0
-            beta[1] = plate.left_border_temperature
+        self.a_i_y = plate.thermal_conductivity / self.dy_sqr
+        self.b_i_y = 2.0 * self.a_i_y + self.plate.material_density * self.plate.heat_capacity / self.tau
+        self.c_i_y = self.a_i_y
 
-            for i in range(1, axis_x_shape):
-                fi = -plate.material_density * plate.heat_capacity * plate.matrix[j][i] / tau
-                alfa[i] = ci / (bi - ci * alfa[i - 1])
-                beta[i] = (ci * beta[i - 1] - fi) / (bi - ci * alfa[i - 1])
+        self.fi_coeff = -self.plate.material_density * self.plate.heat_capacity / self.tau
 
-            plate.matrix[j][axis_x_shape - 1] = plate.right_border_temperature
+    def solve(self):
+        time = 0
+        while time < self.end_time:
+            time += self.tau
 
-            for i in range(axis_x_shape - 2, 1, -1):
-                plate.matrix[j][i] = alfa[i] * plate.matrix[j][i + 1] + beta[i]
+            self.solve_x_axis()
+            self.solve_y_axis()
 
-        for i in range(1, axis_x_shape - 1):
-            alfa[1] = atau_coeff / (atau_coeff + sqrt_dy)
-            beta[1] = sqrt_dy * plate.matrix[1][i] / (atau_coeff + sqrt_dy)
+    def solve_y_axis(self):
+        for i in range(1, self.x_axis_shape - 2, 1):
+            self.alfa[1] = self.tau_coeff / (self.tau_coeff + self.dy_sqr)
+            self.betta[1] = self.dy_sqr * self.plate.matrix[1, i] / (self.tau_coeff + self.dy_sqr)
 
-            for j in range(1, axis_y_shape):
-                ai = thermal_conductivity_sqrt
-                bi = 2.0 * thermal_conductivity_sqrt + plate.material_density * plate.heat_capacity / tau
-                ci = thermal_conductivity_sqrt
-                fi = -plate.material_density * plate.heat_capacity * plate.matrix[j][i] / tau
+            for j in range(1, self.y_axis_shape - 2, 1):
+                if self.plate.is_hole(i + 1, j + 1):
+                    continue
 
-                alfa[j] = ai / (bi - ci * alfa[j - 1])
-                beta[j] = (ci * beta[j - 1] - fi) / (bi - ci * alfa[j - 1])
+                f_i = self.fi_coeff * self.plate.matrix[j, i]
 
-            plate.matrix[axis_y_shape - 1][i] = (atau_coeff * beta[axis_y_shape - 2] +
-                                                 sqrt_dy * plate.matrix[axis_y_shape - 1][i]) / \
-                                                (atau_coeff * (1.0 - alfa[axis_y_shape - 2]) + sqrt_dy)
+                j_coeff = self.b_i_x - self.c_i_x * self.alfa[j - 1]
+                self.alfa[j] = self.a_i_x / j_coeff
+                self.betta[j] = (self.c_i_x * self.betta[j - 1] - f_i) / j_coeff
 
-            for j in range(axis_y_shape - 2, 0, -1):
-                plate.matrix[j][i] = alfa[j] * plate.matrix[j + 1][i] + beta[j]
+            last_y_index = self.y_axis_shape - 1
+            self.plate.matrix[last_y_index, i] = \
+                (self.tau_coeff * self.betta[last_y_index] + self.dy_sqr * self.plate.matrix[
+                    last_y_index, i]) / (self.tau_coeff * (1.0 - self.alfa[last_y_index]) + self.dy_sqr)
 
+            for j in range(last_y_index - 1, 0, -1):
+                if not self.plate.is_hole(i + 1, j + 1):
+                    self.plate.matrix[j, i] = self.alfa[j] * self.plate.matrix[j + 1, i] + self.betta[
+                        j] + self.laser.calculate(self.plate.x[i], self.plate.y[j])
 
-testing_plate = Plate(10, 10, Hole(Point(4, 4), 4, 4), 0.2, 0.2)
+    def solve_x_axis(self):
+        self.alfa[1] = 0
+        self.betta[1] = self.plate.outer_border_temperature
 
-solve(testing_plate)
+        for j in range(self.y_axis_shape - 1):
+            for k in range(1, self.x_axis_shape - 1, 1):
+                if not (self.plate.is_hole(k + 2, j + 2) or self.plate.is_hole(k, j)):
+                    f_i = self.fi_coeff * self.plate.matrix[j, k]
 
-testing_plate.make_hole()
+                    k_coeff = self.b_i_x - self.c_i_x * self.alfa[k - 1]
+                    self.alfa[k] = self.a_i_x / k_coeff
+                    self.betta[k] = (self.c_i_x * self.betta[k - 1] - f_i) / k_coeff
 
-fig = plt.figure()
-ax = fig.add_subplot(projection='3d')
-X, Y = np.meshgrid(testing_plate.x, testing_plate.y)
-ax.plot_surface(X, Y, testing_plate.matrix, rstride=1, cstride=1, cmap='viridis')
+            self.plate.matrix[j, self.x_axis_shape - 1] = self.plate.outer_border_temperature
 
-plt.show()
+            for k in range(self.x_axis_shape - 2, 0, -1):
+                if not (self.plate.is_hole(k + 2, j + 2) or self.plate.is_hole(k, j)):
+                    self.plate.matrix[j, k] = self.alfa[k] * self.plate.matrix[j, k + 1] + self.betta[
+                        k] + self.laser.calculate(self.plate.x[k], self.plate.y[j])
+
+    if __name__ == '__main__':
+        pass
